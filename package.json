@@ -1,6 +1,6 @@
 {
   "name": "pg-access-tunnel",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Opens postgres.js connections through a Cloudflare Tunnel protected by an Access service token.",
   "private": true,
   "license": "UNLICENSED",

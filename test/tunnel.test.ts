@@ -47,6 +47,9 @@ describe("tunnelSocket", () => {
     try {
       const stream = await tunnelSocket({ host: edge.url(), ...TOKEN })();
       expect(edge.seen).toEqual({ id: TOKEN.clientId, secret: TOKEN.clientSecret });
+      // Set before ws loads, so a bundler's empty stand-ins are never used.
+      expect(process.env.WS_NO_BUFFER_UTIL).toBe("1");
+      expect(process.env.WS_NO_UTF_8_VALIDATE).toBe("1");
       expect((stream as unknown as { readyState: string }).readyState).toBe("open");
 
       const reply = new Promise<Buffer>((r) => stream.once("data", r));

@@ -34,7 +34,13 @@ __export(src_exports, {
   viaTunnel: () => viaTunnel
 });
 module.exports = __toCommonJS(src_exports);
-var import_ws = __toESM(require("ws"), 1);
+var loading;
+function loadWs() {
+  var _a, _b;
+  (_a = process.env).WS_NO_BUFFER_UTIL || (_a.WS_NO_BUFFER_UTIL = "1");
+  (_b = process.env).WS_NO_UTF_8_VALIDATE || (_b.WS_NO_UTF_8_VALIDATE = "1");
+  return loading ?? (loading = import("ws"));
+}
 var PING_EVERY_MS = 3e4;
 function settings(options) {
   const host = options.host ?? process.env.DB_TUNNEL_HOST;
@@ -62,9 +68,12 @@ function refused(url, status) {
   const why = status === 401 || status === 403 ? "Cloudflare refused the service token. Check CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET." : status === 502 || status === 530 ? "Cloudflare could not reach the database server. Check the cloudflared service on it." : "Cloudflare did not open the tunnel.";
   return new Error(`pg-access-tunnel: ${url} answered HTTP ${status}. ${why}`);
 }
-function open(s) {
+async function open(s) {
+  const mod = await loadWs();
+  const WebSocketClass = mod.default ?? mod;
+  const createWebSocketStream = mod.createWebSocketStream ?? WebSocketClass.createWebSocketStream;
   return new Promise((resolve, reject) => {
-    const ws = new import_ws.default(s.url, {
+    const ws = new WebSocketClass(s.url, {
       headers: {
         "CF-Access-Client-Id": s.clientId,
         "CF-Access-Client-Secret": s.clientSecret
@@ -87,12 +96,12 @@ function open(s) {
     ws.once("open", () => {
       settled = true;
       ws.off("error", fail);
-      const stream = (0, import_ws.createWebSocketStream)(ws);
+      const stream = createWebSocketStream(ws);
       const ping = setInterval(() => ws.ping(), PING_EVERY_MS);
       ping.unref();
       ws.once("close", () => clearInterval(ping));
       Object.defineProperty(stream, "readyState", {
-        get: () => ws.readyState === import_ws.default.OPEN ? "open" : "closed"
+        get: () => ws.readyState === ws.OPEN ? "open" : "closed"
       });
       resolve(stream);
     });

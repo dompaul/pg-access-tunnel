@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.1
+
+- Works in apps built with webpack, which is how Next.js builds unless told to
+  use Turbopack. Webpack swapped ws's optional native helpers for empty
+  modules, so the first larger frame threw "mask is not a function" and the
+  connection timed out. ws is now loaded on first connection, with those
+  helpers switched off, and uses its own JavaScript versions.
+
 ## 1.0.0
 
 First release.

@@ -1,5 +1,20 @@
 import type { Duplex } from "node:stream";
-import WebSocket, { createWebSocketStream } from "ws";
+import type WebSocket from "ws";
+
+type Ws = typeof import("ws");
+let loading: Promise<Ws> | undefined;
+
+// Next.js builds with webpack unless told to use Turbopack, and webpack swaps
+// ws's optional native helpers (bufferutil, utf-8-validate) for empty modules.
+// ws then believes they loaded, and the first frame of 48 bytes or more throws
+// "mask is not a function". These flags make ws use its own JavaScript
+// versions instead, so ws is loaded here, after they are set, and not at the
+// top of the file.
+function loadWs(): Promise<Ws> {
+  process.env.WS_NO_BUFFER_UTIL ||= "1";
+  process.env.WS_NO_UTF_8_VALIDATE ||= "1";
+  return (loading ??= import("ws"));
+}
 
 export interface TunnelOptions {
   /** Tunnel hostname, such as `db.example.com`. Defaults to `DB_TUNNEL_HOST`. */
@@ -59,9 +74,15 @@ function refused(url: string, status: number | undefined): Error {
   return new Error(`pg-access-tunnel: ${url} answered HTTP ${status}. ${why}`);
 }
 
-function open(s: Settings): Promise<Duplex> {
+async function open(s: Settings): Promise<Duplex> {
+  const mod = await loadWs();
+  // ESM gives the class as `default`; CommonJS interop gives the module itself.
+  const WebSocketClass = (mod.default ?? mod) as typeof WebSocket;
+  const createWebSocketStream =
+    mod.createWebSocketStream ?? (WebSocketClass as unknown as Ws).createWebSocketStream;
+
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(s.url, {
+    const ws = new WebSocketClass(s.url, {
       headers: {
         "CF-Access-Client-Id": s.clientId,
         "CF-Access-Client-Secret": s.clientSecret,
@@ -96,7 +117,7 @@ function open(s: Settings): Promise<Duplex> {
       // postgres.js only sends its goodbye message to a socket that reports
       // itself open, as a net.Socket would.
       Object.defineProperty(stream, "readyState", {
-        get: () => (ws.readyState === WebSocket.OPEN ? "open" : "closed"),
+        get: () => (ws.readyState === ws.OPEN ? "open" : "closed"),
       });
 
       resolve(stream);
