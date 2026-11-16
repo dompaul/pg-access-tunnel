@@ -25,6 +25,12 @@ export interface TunnelOptions {
   clientSecret?: string;
   /** How long to wait for Cloudflare to open the tunnel, in milliseconds. */
   timeoutMs?: number;
+  /**
+   * How often an open connection checks the tunnel still answers, and how long
+   * it waits for the answer, in milliseconds. A connection that does not answer
+   * in time is closed. Defaults to 5000.
+   */
+  heartbeatMs?: number;
 }
 
 interface Settings {
@@ -32,11 +38,13 @@ interface Settings {
   clientId: string;
   clientSecret: string;
   timeoutMs: number;
+  heartbeatMs: number;
 }
 
-// Keeps an idle connection from being dropped part way through the pool's
-// idle timeout. Unref'd, so it never holds a serverless function open.
-const PING_EVERY_MS = 30_000;
+// Short enough that a dead connection fails its query well inside a serverless
+// function's time limit, rather than hanging until the platform kills it. The
+// same pings keep an idle connection from being dropped.
+const HEARTBEAT_MS = 5_000;
 
 function settings(options: TunnelOptions): Settings {
   const host = options.host ?? process.env.DB_TUNNEL_HOST;
@@ -61,6 +69,7 @@ function settings(options: TunnelOptions): Settings {
     clientId: clientId!,
     clientSecret: clientSecret!,
     timeoutMs: options.timeoutMs ?? 10_000,
+    heartbeatMs: options.heartbeatMs ?? HEARTBEAT_MS,
   };
 }
 
@@ -72,6 +81,80 @@ function refused(url: string, status: number | undefined): Error {
         ? "Cloudflare could not reach the database server. Check the cloudflared service on it."
         : "Cloudflare did not open the tunnel.";
   return new Error(`pg-access-tunnel: ${url} answered HTTP ${status}. ${why}`);
+}
+
+/**
+ * Closes the stream when the tunnel closes the WebSocket.
+ *
+ * ws's stream only ends its readable side when the WebSocket closes, and under
+ * postgres.js's TLS socket that never becomes a "close". postgres.js then keeps
+ * the dead connection in its pool: a query already sent waits for ever, and the
+ * next one fails with "WebSocket is not open". Destroying the stream tells
+ * postgres.js the connection has gone, which fails the query in flight and
+ * opens a fresh connection for the next one.
+ */
+function closeWithTunnel(ws: WebSocket, stream: Duplex): void {
+  ws.once("close", (code: number) => {
+    if (stream.destroyed) return;
+    // The app ending its own connection is the normal way to close, not a fault.
+    stream.destroy(
+      stream.writableEnded
+        ? undefined
+        : new Error(`pg-access-tunnel: the tunnel closed the connection (WebSocket code ${code}).`),
+    );
+  });
+}
+
+/**
+ * Closes the stream when the tunnel stops answering.
+ *
+ * A connection can die without closing: the far end goes away and no packet
+ * says so. A query sent down it waits for a reply that never comes. The tunnel
+ * answers a ping in milliseconds, so a ping left unanswered for `heartbeatMs`
+ * means the connection is dead, and closing it fails the query in flight
+ * instead of leaving it to hang.
+ */
+function closeWhenSilent(ws: WebSocket, stream: Duplex, heartbeatMs: number): void {
+  let heardAt = Date.now();
+  const heard = () => {
+    heardAt = Date.now();
+  };
+  ws.on("message", heard);
+  ws.on("pong", heard);
+
+  let waiting: NodeJS.Timeout | undefined;
+  const ping = () => {
+    if (waiting || ws.readyState !== ws.OPEN) return;
+    const sentAt = Date.now();
+    ws.ping();
+    waiting = setTimeout(() => {
+      waiting = undefined;
+      if (heardAt >= sentAt) return;
+      // A timer this late means the process was frozen between requests or
+      // busy, and a paused socket means the app has not read what arrived.
+      // Neither says the tunnel went quiet, so ask again rather than judge.
+      if (ws.isPaused || Date.now() - sentAt > 2 * heartbeatMs) return ping();
+      // Let anything already waiting on the socket be read before deciding.
+      setImmediate(() => {
+        // An app already closing its own connection is not a fault either.
+        if (heardAt >= sentAt || stream.destroyed || stream.writableEnded) return;
+        stream.destroy(
+          new Error(
+            `pg-access-tunnel: the tunnel did not answer for ${heartbeatMs} ms, so the connection was closed.`,
+          ),
+        );
+      });
+    }, heartbeatMs);
+    // Unref'd, so neither timer ever holds a serverless function open.
+    waiting.unref();
+  };
+
+  const every = setInterval(ping, heartbeatMs);
+  every.unref();
+  ws.once("close", () => {
+    clearInterval(every);
+    clearTimeout(waiting);
+  });
 }
 
 async function open(s: Settings): Promise<Duplex> {
@@ -110,9 +193,8 @@ async function open(s: Settings): Promise<Duplex> {
       ws.off("error", fail);
 
       const stream = createWebSocketStream(ws);
-      const ping = setInterval(() => ws.ping(), PING_EVERY_MS);
-      ping.unref();
-      ws.once("close", () => clearInterval(ping));
+      closeWithTunnel(ws, stream);
+      closeWhenSilent(ws, stream, s.heartbeatMs);
 
       // postgres.js only sends its goodbye message to a socket that reports
       // itself open, as a net.Socket would.

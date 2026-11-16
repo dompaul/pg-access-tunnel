@@ -6,7 +6,7 @@ function loadWs() {
   (_b = process.env).WS_NO_UTF_8_VALIDATE || (_b.WS_NO_UTF_8_VALIDATE = "1");
   return loading ?? (loading = import("ws"));
 }
-var PING_EVERY_MS = 3e4;
+var HEARTBEAT_MS = 5e3;
 function settings(options) {
   const host = options.host ?? process.env.DB_TUNNEL_HOST;
   const clientId = options.clientId ?? process.env.CF_ACCESS_CLIENT_ID;
@@ -26,12 +26,55 @@ function settings(options) {
     url: /^wss?:\/\//.test(host) ? host : `wss://${host}`,
     clientId,
     clientSecret,
-    timeoutMs: options.timeoutMs ?? 1e4
+    timeoutMs: options.timeoutMs ?? 1e4,
+    heartbeatMs: options.heartbeatMs ?? HEARTBEAT_MS
   };
 }
 function refused(url, status) {
   const why = status === 401 || status === 403 ? "Cloudflare refused the service token. Check CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET." : status === 502 || status === 530 ? "Cloudflare could not reach the database server. Check the cloudflared service on it." : "Cloudflare did not open the tunnel.";
   return new Error(`pg-access-tunnel: ${url} answered HTTP ${status}. ${why}`);
+}
+function closeWithTunnel(ws, stream) {
+  ws.once("close", (code) => {
+    if (stream.destroyed) return;
+    stream.destroy(
+      stream.writableEnded ? void 0 : new Error(`pg-access-tunnel: the tunnel closed the connection (WebSocket code ${code}).`)
+    );
+  });
+}
+function closeWhenSilent(ws, stream, heartbeatMs) {
+  let heardAt = Date.now();
+  const heard = () => {
+    heardAt = Date.now();
+  };
+  ws.on("message", heard);
+  ws.on("pong", heard);
+  let waiting;
+  const ping = () => {
+    if (waiting || ws.readyState !== ws.OPEN) return;
+    const sentAt = Date.now();
+    ws.ping();
+    waiting = setTimeout(() => {
+      waiting = void 0;
+      if (heardAt >= sentAt) return;
+      if (ws.isPaused || Date.now() - sentAt > 2 * heartbeatMs) return ping();
+      setImmediate(() => {
+        if (heardAt >= sentAt || stream.destroyed || stream.writableEnded) return;
+        stream.destroy(
+          new Error(
+            `pg-access-tunnel: the tunnel did not answer for ${heartbeatMs} ms, so the connection was closed.`
+          )
+        );
+      });
+    }, heartbeatMs);
+    waiting.unref();
+  };
+  const every = setInterval(ping, heartbeatMs);
+  every.unref();
+  ws.once("close", () => {
+    clearInterval(every);
+    clearTimeout(waiting);
+  });
 }
 async function open(s) {
   const mod = await loadWs();
@@ -62,9 +105,8 @@ async function open(s) {
       settled = true;
       ws.off("error", fail);
       const stream = createWebSocketStream(ws);
-      const ping = setInterval(() => ws.ping(), PING_EVERY_MS);
-      ping.unref();
-      ws.once("close", () => clearInterval(ping));
+      closeWithTunnel(ws, stream);
+      closeWhenSilent(ws, stream, s.heartbeatMs);
       Object.defineProperty(stream, "readyState", {
         get: () => ws.readyState === ws.OPEN ? "open" : "closed"
       });

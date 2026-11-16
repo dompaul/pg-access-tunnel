@@ -48,6 +48,20 @@ returns the postgres.js `socket` option on its own.
 | `CF_ACCESS_CLIENT_ID` | Client ID of the Access service token |
 | `CF_ACCESS_CLIENT_SECRET` | Client secret of the Access service token |
 
+## Dead connections
+
+A connection the tunnel closes is closed for postgres.js at once, so the query
+in flight fails and the next query opens a fresh connection. A connection that
+stops answering without closing is caught by a heartbeat: each open connection
+pings the tunnel every `heartbeatMs` (5 seconds by default) and closes if a
+ping goes unanswered for as long again. A dead connection therefore fails its
+query within about two heartbeats instead of hanging until the platform kills
+the function.
+
+```ts
+viaTunnel(config, { heartbeatMs: 5_000 });
+```
+
 ## Errors
 
 | Message | Meaning |
@@ -55,6 +69,8 @@ returns the postgres.js `socket` option on its own.
 | `... not set` | A setting is missing from the environment |
 | `HTTP 401` or `HTTP 403` | Cloudflare refused the service token |
 | `HTTP 502` or `HTTP 530` | Cloudflare could not reach the database server |
+| `the tunnel closed the connection (WebSocket code ...)` | The tunnel closed a connection while a query was using it. The next query opens a new one |
+| `the tunnel did not answer for ... ms` | A connection stopped answering pings, so it was closed rather than left to hang |
 
 ## Limits
 
