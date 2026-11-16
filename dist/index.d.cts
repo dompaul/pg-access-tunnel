@@ -9,6 +9,12 @@ interface TunnelOptions {
     clientSecret?: string;
     /** How long to wait for Cloudflare to open the tunnel, in milliseconds. */
     timeoutMs?: number;
+    /**
+     * How often an open connection checks the tunnel still answers, and how long
+     * it waits for the answer, in milliseconds. A connection that does not answer
+     * in time is closed. Defaults to 5000.
+     */
+    heartbeatMs?: number;
 }
 /**
  * A postgres.js `socket` option that opens each connection through the
